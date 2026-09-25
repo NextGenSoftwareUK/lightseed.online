@@ -481,8 +481,13 @@ service cloud.firestore {
       // `invitesRemaining` is a server-authoritative allowance. From the client a user may only
       // SPEND it (lower it) or hold it within the self-serve allotment (144, granted on community
       // creation) — it can never be inflated past that, closing the "set invitesRemaining:1e6 →
-      // unlimited invites" hole. All other profile fields (theme, prefs, privacy flags) stay
-      // self-writable. Staff may set any value.
+      // unlimited invites" hole. All other profile fields (theme, prefs, privacy flags, and the
+      // OASIS linked identity block) stay self-writable. Staff may set any value.
+      //
+      // oasisIdentity: the user writes the safe display fields (avatarId, username, karma, herzId)
+      // after a successful OASIS API login in their own browser session. The JWT is never stored
+      // here — it lives server-side only (Cloud Function admin SDK). Setting oasisIdentity to null
+      // removes the link (unlink action).
       allow update: if isStaff()
         || (isOwner(userId) && (
              request.resource.data.get('invitesRemaining', 0) <= resource.data.get('invitesRemaining', 0)

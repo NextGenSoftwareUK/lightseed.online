@@ -17,3 +17,4 @@ export * from './firebase/engagement';
 export * from './firebase/covenants';
 export * from './firebase/stays';
 export * from './firebase/holds';
+export * from './firebase/oasis';

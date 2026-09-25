@@ -1,60 +1,69 @@
 // useOasisIdentity — the React seam for OASIS / HerzID integration.
 //
 // Provides the current user's linked OASIS identity (if any), plus actions to link, unlink,
-// register a HerzID, and sync karma. State is local to the hook; callers re-render on change.
+// register a HerzID, sync karma, vouch for others, and manage biometrics.
 //
-// The hook is intentionally self-contained — it does not add fields to SessionContext. OASIS
-// identity is optional and peripheral; the core session (Firebase uid, trees, admin flags)
-// must not be coupled to an external API's availability.
+// Since ring 2026-09-25: all mutations go through Cloud Functions. The OASIS JWT is stored
+// server-side; the browser never touches it and never needs to re-enter credentials after
+// the initial link. The hook remains self-contained — OASIS identity is optional and additive.
 
 import { useState, useEffect, useCallback } from 'react';
+import { httpsCallable } from 'firebase/functions';
+import { signInWithCustomToken } from 'firebase/auth';
 import { useSession } from '../contexts/SessionContext';
 import type { LinkedOasisIdentity } from '../domain/oasis';
-import {
-    getLinkedOasisIdentity,
-    saveLinkedOasisIdentity,
-    updateOasisKarma,
-    saveHerzId,
-    unlinkOasisIdentity,
-} from '../services/firebase/oasis';
-import {
-    oasisAvatarLogin,
-    oasisGetKarma,
-    oasisHerzRegister,
-    type HerzRegisterRequest,
-} from '../services/oasis';
+import { getLinkedOasisIdentity } from '../services/firebase/oasis';
+import { functions, auth } from '../services/firebase/core';
+
+// ── Callable handles (created once, not per render) ───────────────────────────────────────
+const callLink       = httpsCallable<{ email: string; password: string }, { identity: LinkedOasisIdentity }>(functions, 'linkOasisAvatar');
+const callUnlink     = httpsCallable<Record<never, never>, { ok: boolean }>(functions, 'unlinkOasisAvatarFn');
+const callSyncKarma  = httpsCallable<Record<never, never>, { karmaScore: number; syncedAt: string }>(functions, 'syncOasisKarma');
+const callRegisterHz = httpsCallable<{ countryCode: string; voucherHerzId?: string },
+    { herzId: string; clearanceLevel: number; countryCode: string; joinedAt: string }>(functions, 'registerOasisHerzId');
+const callVouch      = httpsCallable<{ targetHerzId: string }, { ok: boolean }>(functions, 'vouchForHerzId');
+const callEnroll     = httpsCallable<{ audioBase64: string }, { enrolled: boolean }>(functions, 'enrollBiometric');
+const callVerify     = httpsCallable<{ audioBase64: string }, { verified: boolean }>(functions, 'verifyBiometric');
+const callSignIn     = httpsCallable<{ email: string; password: string }, { customToken: string }>(functions, 'signInWithOasis');
 
 type Status = 'idle' | 'loading' | 'error';
 
 export interface OasisIdentityState {
-    // The currently linked identity, or null if none.
     identity: LinkedOasisIdentity | null;
-    // True while any async operation is in progress.
     busy: boolean;
-    // The last error message, or null.
     error: string | null;
-    // Link this Firebase account to an OASIS Avatar. Prompts for OASIS credentials.
+    // Link this Firebase account to an OASIS Avatar (credentials sent to Cloud Function once).
     link: (oasisEmail: string, oasisPassword: string) => Promise<void>;
-    // Remove the OASIS identity link.
+    // Remove the OASIS link server-side.
     unlink: () => Promise<void>;
-    // Register a HerzID for the linked avatar.
-    // Credentials are required to obtain a fresh OASIS JWT for the mutation.
-    registerHerzId: (req: HerzRegisterRequest & { oasisEmail: string; oasisPassword: string }) => Promise<void>;
-    // Re-fetch karma from the OASIS API and update Firestore.
-    syncKarma: (oasisEmail: string, oasisPassword: string) => Promise<void>;
-    // Clear the error.
+    // Register a HerzID — no credentials needed (uses stored JWT).
+    registerHerzId: (countryCode: string, voucherHerzId?: string) => Promise<void>;
+    // Re-fetch karma from the OASIS API — no credentials needed.
+    syncKarma: () => Promise<void>;
+    // Vouch for another user's HerzID — no credentials needed.
+    vouchForHerzId: (targetHerzId: string) => Promise<void>;
+    // Enrol voice biometric — accepts a base64-encoded audio blob.
+    enrollBiometric: (audioBase64: string) => Promise<void>;
+    // Verify a voice sample against the enrolled biometric.
+    verifyBiometric: (audioBase64: string) => Promise<boolean>;
     clearError: () => void;
 }
+
+// Standalone helper: "Sign in with OASIS" — verifies OASIS credentials server-side,
+// then signs the browser into Firebase with a custom token. Call this from the sign-in UI.
+export const signInWithOasis = async (oasisEmail: string, oasisPassword: string): Promise<void> => {
+    const res = await callSignIn({ email: oasisEmail, password: oasisPassword });
+    await signInWithCustomToken(auth, res.data.customToken);
+};
 
 export const useOasisIdentity = (): OasisIdentityState => {
     const { lightseed } = useSession();
     const uid = lightseed?.uid ?? null;
 
     const [identity, setIdentity] = useState<LinkedOasisIdentity | null>(null);
-    const [status, setStatus] = useState<Status>('idle');
-    const [error, setError] = useState<string | null>(null);
+    const [status, setStatus]     = useState<Status>('idle');
+    const [error, setError]       = useState<string | null>(null);
 
-    // Load on mount / user change.
     useEffect(() => {
         if (!uid) { setIdentity(null); return; }
         setStatus('loading');
@@ -65,123 +74,75 @@ export const useOasisIdentity = (): OasisIdentityState => {
 
     const busy = status === 'loading';
 
-    // ── Link ─────────────────────────────────────────────────────────────────────────────
+    const wrap = useCallback(async (fn: () => Promise<void>) => {
+        setStatus('loading'); setError(null);
+        try { await fn(); setStatus('idle'); }
+        catch (e) { setError((e as Error).message); setStatus('error'); }
+    }, []);
+
     const link = useCallback(async (oasisEmail: string, oasisPassword: string) => {
         if (!uid) return;
-        setStatus('loading'); setError(null);
-        try {
-            const res = await oasisAvatarLogin(oasisEmail, oasisPassword);
-            if (!res.isSuccess || !res.result) throw new Error(res.message ?? 'Login failed.');
+        await wrap(async () => {
+            const res = await callLink({ email: oasisEmail, password: oasisPassword });
+            setIdentity(res.data.identity);
+        });
+    }, [uid, wrap]);
 
-            const { id: avatarId, username: avatarUsername, token, karmaScore } = res.result;
-
-            // Fetch karma if not already in the login response.
-            let karma = karmaScore;
-            if (karma == null) {
-                const kr = await oasisGetKarma(avatarId, token).catch(() => null);
-                karma = kr?.result?.karmaScore;
-            }
-
-            const linked: LinkedOasisIdentity = {
-                avatarId,
-                avatarUsername,
-                linkedAt: new Date().toISOString(),
-                karmaScore: karma,
-                karmaSyncedAt: karma != null ? new Date().toISOString() : undefined,
-            };
-            await saveLinkedOasisIdentity(uid, linked);
-            setIdentity(linked);
-            setStatus('idle');
-        } catch (e) {
-            setError((e as Error).message);
-            setStatus('error');
-        }
-    }, [uid]);
-
-    // ── Unlink ────────────────────────────────────────────────────────────────────────────
     const unlink = useCallback(async () => {
         if (!uid) return;
-        setStatus('loading'); setError(null);
-        try {
-            await unlinkOasisIdentity(uid);
+        await wrap(async () => {
+            await callUnlink({});
             setIdentity(null);
+        });
+    }, [uid, wrap]);
+
+    const registerHerzId = useCallback(async (countryCode: string, voucherHerzId?: string) => {
+        if (!uid) return;
+        await wrap(async () => {
+            const res = await callRegisterHz({ countryCode, voucherHerzId });
+            const { herzId, clearanceLevel, countryCode: cc, joinedAt } = res.data;
+            setIdentity(prev => prev ? { ...prev, herzId, herzClearanceLevel: clearanceLevel, herzCountryCode: cc, herzJoinedAt: joinedAt } : prev);
+        });
+    }, [uid, wrap]);
+
+    const syncKarma = useCallback(async () => {
+        if (!uid) return;
+        await wrap(async () => {
+            const res = await callSyncKarma({});
+            setIdentity(prev => prev ? { ...prev, karmaScore: res.data.karmaScore, karmaSyncedAt: res.data.syncedAt } : prev);
+        });
+    }, [uid, wrap]);
+
+    const vouchForHerzId = useCallback(async (targetHerzId: string) => {
+        if (!uid) return;
+        await wrap(async () => { await callVouch({ targetHerzId }); });
+    }, [uid, wrap]);
+
+    const enrollBiometric = useCallback(async (audioBase64: string) => {
+        if (!uid) return;
+        await wrap(async () => {
+            await callEnroll({ audioBase64 });
+            setIdentity(prev => prev ? { ...prev, biometricEnrolled: true } : prev);
+        });
+    }, [uid, wrap]);
+
+    const verifyBiometric = useCallback(async (audioBase64: string): Promise<boolean> => {
+        if (!uid) return false;
+        try {
+            setStatus('loading'); setError(null);
+            const res = await callVerify({ audioBase64 });
             setStatus('idle');
+            return res.data.verified;
         } catch (e) {
-            setError((e as Error).message);
-            setStatus('error');
+            setError((e as Error).message); setStatus('error');
+            return false;
         }
     }, [uid]);
 
-    // ── Register HerzID ───────────────────────────────────────────────────────────────────
-    // Requires the avatar to be already linked (we need a fresh JWT, so the user supplies
-    // their OASIS credentials again). A future Cloud Function can store the token so the
-    // user doesn't have to re-enter credentials for mutations.
-    const registerHerzId = useCallback(async (req: HerzRegisterRequest & { oasisEmail: string; oasisPassword: string }) => {
-        if (!uid || !identity) { setError('No OASIS Avatar linked.'); return; }
-        setStatus('loading'); setError(null);
-        try {
-            // Obtain a fresh token.
-            const authRes = await oasisAvatarLogin(req.oasisEmail, req.oasisPassword);
-            if (!authRes.isSuccess || !authRes.result) throw new Error(authRes.message ?? 'Auth failed.');
-            const { token } = authRes.result;
-
-            const herzRes = await oasisHerzRegister({
-                countryCode: req.countryCode,
-                voucherHerzId: req.voucherHerzId,
-            }, token);
-
-            if (!herzRes.isSuccess || !herzRes.result) throw new Error(herzRes.message ?? 'HerzID registration failed.');
-
-            const { herzId, clearanceLevel, countryCode, joinedAt } = herzRes.result;
-            await saveHerzId(uid, herzId, clearanceLevel, countryCode, joinedAt);
-
-            setIdentity(prev => prev ? {
-                ...prev,
-                herzId,
-                herzClearanceLevel: clearanceLevel,
-                herzCountryCode: countryCode,
-                herzJoinedAt: joinedAt,
-            } : prev);
-            setStatus('idle');
-        } catch (e) {
-            setError((e as Error).message);
-            setStatus('error');
-        }
-    }, [uid, identity]);
-
-    // ── Sync karma ────────────────────────────────────────────────────────────────────────
-    const syncKarma = useCallback(async (oasisEmail: string, oasisPassword: string) => {
-        if (!uid || !identity) { setError('No OASIS Avatar linked.'); return; }
-        setStatus('loading'); setError(null);
-        try {
-            const authRes = await oasisAvatarLogin(oasisEmail, oasisPassword);
-            if (!authRes.isSuccess || !authRes.result) throw new Error(authRes.message ?? 'Auth failed.');
-            const { token } = authRes.result;
-
-            const kr = await oasisGetKarma(identity.avatarId, token);
-            if (!kr.isSuccess || !kr.result) throw new Error('Karma sync failed.');
-
-            await updateOasisKarma(uid, kr.result.karmaScore);
-            setIdentity(prev => prev ? {
-                ...prev,
-                karmaScore: kr.result!.karmaScore,
-                karmaSyncedAt: new Date().toISOString(),
-            } : prev);
-            setStatus('idle');
-        } catch (e) {
-            setError((e as Error).message);
-            setStatus('error');
-        }
-    }, [uid, identity]);
-
     return {
-        identity,
-        busy,
-        error,
-        link,
-        unlink,
-        registerHerzId,
-        syncKarma,
+        identity, busy, error,
+        link, unlink, registerHerzId, syncKarma, vouchForHerzId,
+        enrollBiometric, verifyBiometric,
         clearError: () => setError(null),
     };
 };

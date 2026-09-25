@@ -39,6 +39,8 @@
     "node:create": "node scripts/create-node.mjs"
   },
   "dependencies": {
+    "@oasisomniverse/react": "^1.2.0",
+    "@oasisomniverse/web4-api": "^2.0.13",
     "@google/generative-ai": "^0.24.1",
     "dompurify": "^3.4.11",
     "dotenv": "^17.4.2",

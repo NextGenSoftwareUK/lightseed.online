@@ -49,6 +49,8 @@ export interface LinkedOasisIdentity {
     herzJoinedAt?: string;
     // HerzID country code (3-digit string, e.g. "052")
     herzCountryCode?: string;
+    // True after a successful biometric voice enrolment
+    biometricEnrolled?: boolean;
 }
 
 // ── OASIS API response shapes (raw, before mapping) ───────────────────────────────────────

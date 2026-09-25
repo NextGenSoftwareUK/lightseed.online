@@ -495,6 +495,13 @@ service cloud.firestore {
            ));
     }
 
+    // oasisTokens — OASIS JWT store (ring 2026-09-25). Admin SDK only; no client may read or write.
+    // The token is written by Cloud Functions after a successful OASIS login. No rule below
+    // opens this collection: the implicit Firestore default (deny) closes every client path.
+    match /oasisTokens/{uid} {
+      allow read, write: if false;
+    }
+
     // Subscriptions — THE LETTER OF A PLACE (ring 2026-09-08). Anyone may subscribe an address
     // at a place (the footer): the row must name its place (`domain`) and an address. A signed-in
     // being may read and re-set the rows that carry its own address (the profile toggle); staff

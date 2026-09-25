@@ -4,6 +4,7 @@ import {
     herzClearanceLabel,
     displayHerzId,
     HERZ_TIER_LABELS,
+    type LinkedOasisIdentity,
 } from '../src/domain/oasis';
 
 describe('herzTierLabel', () => {
@@ -28,13 +29,45 @@ describe('herzTierLabel', () => {
 describe('herzClearanceLabel', () => {
     it('combines tier name and numeric level', () => {
         expect(herzClearanceLabel(3)).toBe('Tribe Member (3)');
-        expect(herzClearanceLabel(8)).toBe('Flame Keeper (8)');
+        expect(herzClearanceLabel(6)).toBe('Guardian (6)');
+    });
+
+    it('handles unknown level via fallback', () => {
+        expect(herzClearanceLabel(0)).toBe('Level 0 (0)');
     });
 });
 
 describe('displayHerzId', () => {
-    it('returns the herzId string unchanged', () => {
-        const id = '052·0·000·000·001·✦';
-        expect(displayHerzId(id)).toBe(id);
+    it('returns the herzId string as-is (display form from the API)', () => {
+        expect(displayHerzId('052·0·000·000·001·✦')).toBe('052·0·000·000·001·✦');
+        expect(displayHerzId('052·0·000·000·001·R')).toBe('052·0·000·000·001·R');
+    });
+});
+
+describe('LinkedOasisIdentity type shape', () => {
+    it('accepts a minimal identity (no optional fields)', () => {
+        const id: LinkedOasisIdentity = {
+            avatarId: 'uuid-123',
+            avatarUsername: 'zoltan',
+            linkedAt: new Date().toISOString(),
+        };
+        expect(id.herzId).toBeUndefined();
+        expect(id.biometricEnrolled).toBeUndefined();
+    });
+
+    it('accepts a full identity including biometricEnrolled', () => {
+        const id: LinkedOasisIdentity = {
+            avatarId: 'uuid-456',
+            avatarUsername: 'zoltan',
+            linkedAt: '2026-09-25T00:00:00.000Z',
+            karmaScore: 1234,
+            herzId: '052·0·000·000·001·✦',
+            herzClearanceLevel: 5,
+            herzCountryCode: '052',
+            herzJoinedAt: '2026-01-01',
+            biometricEnrolled: true,
+        };
+        expect(id.herzClearanceLevel).toBe(5);
+        expect(id.biometricEnrolled).toBe(true);
     });
 });

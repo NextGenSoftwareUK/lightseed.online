@@ -14,6 +14,7 @@
   },
   "main": "lib/index.js",
   "dependencies": {
+    "@oasisomniverse/web4-api": "^2.0.13",
     "@anthropic-ai/sdk": "^0.65.0",
     "@google-cloud/kms": "^5.7.0",
     "@google/generative-ai": "^0.24.1",

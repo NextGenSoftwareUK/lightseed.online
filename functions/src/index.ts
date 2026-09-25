@@ -15,3 +15,4 @@ export { beingPreview, facePreview, sitemap, faceEvents } from "./preview";
 export { deriveImageVariants, releasePicture } from "./pictures";
 export { acceptOffering } from "./offeringCalls";
 export { indexPersonLid, indexTreeLid, indexVisionLid, indexLightHouseLid, indexCommunityLid, indexPulseLid, backfillLidIndex } from "./lidIndex";
+export { linkOasisAvatar, syncOasisKarma, registerOasisHerzId, vouchForHerzId, enrollBiometric, verifyBiometric, signInWithOasis, unlinkOasisAvatarFn } from "./oasis";
